@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Monster Hunt</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQ7vMO1MZw8Z9nqUgs/9lGQP5zJrD0=" crossorigin="">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <header><span>👾</span><div><h1>Monster Hunt</h1><p>Find a monster in the real world.</p></div></header>
+      <section class="controls">
+        <label>Hunter name <input id="player-name" maxlength="40" placeholder="Guest hunter"></label>
+        <button id="locate">Find my location</button>
+        <button id="place-demo" disabled>Place a demo monster nearby</button>
+      </section>
+      <p id="status" role="status">Tap “Find my location” to begin.</p>
+      <div id="map" aria-label="Monster hunt map"></div>
+      <p class="note">The demo monster appears roughly 25 metres away. Move within 35 metres and tap its marker to capture it.</p>
+    </main>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

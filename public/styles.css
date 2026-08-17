@@ -1,0 +1,27 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111827; color: #f9fafb; }
+body { margin: 0; }
+main { max-width: 760px; margin: auto; padding: 20px; }
+header { display: flex; align-items: center; gap: 14px; }
+header span { font-size: 3rem; } h1 { margin: 0; } header p { margin: 4px 0; color: #cbd5e1; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 20px 0 12px; }
+label { display: grid; gap: 4px; color: #cbd5e1; } input, button { font: inherit; border-radius: 8px; padding: 10px 12px; border: 1px solid #475569; }
+input { background: #1e293b; color: white; } button { background: #22c55e; color: #052e16; border: 0; font-weight: 700; cursor: pointer; } button:disabled { background: #64748b; color: #cbd5e1; cursor: not-allowed; }
+#status { min-height: 1.5em; color: #fde68a; } #map { height: 60vh; min-height: 360px; border-radius: 12px; overflow: hidden; } .note { color: #cbd5e1; font-size: .9rem; }
+
+/* Local Leaflet positioning fallback: keeps map tiles inside the map canvas. */
+.leaflet-container { position: relative; overflow: hidden; outline: 0; }
+.leaflet-pane, .leaflet-tile, .leaflet-marker-icon, .leaflet-marker-shadow { position: absolute; left: 0; top: 0; }
+.leaflet-pane { z-index: 400; }
+.leaflet-tile-pane { z-index: 200; }
+.leaflet-overlay-pane { z-index: 400; }
+.leaflet-shadow-pane { z-index: 500; }
+.leaflet-marker-pane { z-index: 600; }
+.leaflet-popup-pane { z-index: 700; }
+.leaflet-tile { visibility: inherit; }
+.leaflet-marker-icon, .leaflet-marker-shadow { display: block; }
+.leaflet-popup { position: absolute; text-align: center; margin-bottom: 20px; }
+.leaflet-popup-content-wrapper { padding: 1px; text-align: left; border-radius: 12px; }
+.leaflet-popup-content { margin: 13px 19px; line-height: 1.4; }
+.leaflet-popup-tip-container { width: 40px; height: 20px; position: absolute; left: 50%; margin-left: -20px; overflow: hidden; }
+.leaflet-popup-tip { width: 17px; height: 17px; padding: 1px; margin: -10px auto 0; transform: rotate(45deg); }
+.monster-marker { background: none; border: 0; font-size: 32px; line-height: 38px; text-align: center; filter: drop-shadow(0 2px 2px rgba(0,0,0,.55)); }
