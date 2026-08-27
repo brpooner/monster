@@ -1,5 +1,17 @@
+# Node
 node_modules/
-.pnpm-home/
 .pnpm-store/
-data/
+npm-debug.log*
+
+# Secrets — never commit
 .env
+
+# Runtime database (created on the server)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# OS / editor
+.DS_Store
+Thumbs.db

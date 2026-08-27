@@ -1,81 +1,203 @@
-const express = require('express');
-const Database = require('better-sqlite3');
+'use strict';
 const path = require('path');
 const fs = require('fs');
+const express = require('express');
+const store = require('./db');
+const { parseKml } = require('./kml');
+
+/* ---------- tiny .env loader (no dependency) ---------- */
+(function loadEnv() {
+  try {
+    const envPath = path.join(__dirname, '.env');
+    if (!fs.existsSync(envPath)) return;
+    for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
+      if (m && !(m[1] in process.env)) {
+        process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+      }
+    }
+  } catch (_) {}
+})();
+
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const CATCH_RADIUS_M = Number(process.env.CATCH_RADIUS_M || 30); // server-authoritative
 
 const app = express();
-const port = Number(process.env.PORT || 3000);
-const dataDir = path.join(__dirname, 'data');
-fs.mkdirSync(dataDir, { recursive: true });
-const db = new Database(path.join(dataDir, 'monster-hunt.db'));
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS monsters (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    latitude REAL NOT NULL,
-    longitude REAL NOT NULL,
-    captured_by TEXT,
-    captured_at TEXT
-  );
-`);
-
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-function isCoordinate(value, min, max) {
-  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
+/* ---------- helpers ---------- */
+function distanceM(aLat, aLon, bLat, bLon) {
+  const R = 6371000, toRad = d => d * Math.PI / 180;
+  const dLat = toRad(bLat - aLat), dLon = toRad(bLon - aLon);
+  const s = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+function isActive(m, now) {
+  return (m.start_ms == null || now >= m.start_ms) &&
+         (m.end_ms == null || now <= m.end_ms);
+}
+function requireAdmin(req, res, next) {
+  if (!ADMIN_KEY) return res.status(503).json({ error: 'Admin key not configured on server (.env ADMIN_KEY).' });
+  if (req.get('x-admin-key') !== ADMIN_KEY) return res.status(401).json({ error: 'Bad admin key.' });
+  next();
 }
 
-function distanceMeters(aLat, aLng, bLat, bLng) {
-  const radius = 6_371_000;
-  const radians = degrees => degrees * Math.PI / 180;
-  const dLat = radians(bLat - aLat);
-  const dLng = radians(bLng - aLng);
-  const h = Math.sin(dLat / 2) ** 2
-    + Math.cos(radians(aLat)) * Math.cos(radians(bLat)) * Math.sin(dLng / 2) ** 2;
-  return 2 * radius * Math.asin(Math.sqrt(h));
-}
+/* ---------- teams ---------- */
+// Create or join a team. Same name = same team (shared score).
+// If the team exists and has a PIN, the caller must supply the matching PIN.
+app.post('/api/team', (req, res) => {
+  let { name, pin } = req.body || {};
+  name = (name || '').trim();
+  pin = (pin || '').trim();
+  if (name.length < 1 || name.length > 40) return res.status(400).json({ error: 'Team name must be 1–40 characters.' });
+  if (pin && !/^\d{4}$/.test(pin)) return res.status(400).json({ error: 'PIN must be 4 digits (or blank).' });
 
-app.get('/api/monsters', (_request, response) => {
-  const monsters = db.prepare(`
-    SELECT id, name, latitude, longitude, captured_by AS capturedBy, captured_at AS capturedAt
-    FROM monsters ORDER BY id DESC
-  `).all();
-  response.json(monsters);
+  let team = store.teamByName.get(name);
+  if (team) {
+    if (team.pin && team.pin !== pin) return res.status(403).json({ error: 'Wrong PIN for that team name.' });
+    return res.json({ teamId: team.id, name: team.name, joined: true });
+  }
+  const info = store.createTeam.run({ name, pin: pin || null, created_at: Date.now() });
+  res.json({ teamId: info.lastInsertRowid, name, joined: false });
 });
 
-// Temporary demo action. This becomes the protected admin placement endpoint next.
-app.post('/api/demo-monster', (request, response) => {
-  const { latitude, longitude } = request.body;
-  if (!isCoordinate(latitude, -90, 90) || !isCoordinate(longitude, -180, 180)) {
-    return response.status(400).json({ error: 'A valid location is required.' });
-  }
-  db.prepare('DELETE FROM monsters WHERE name = ?').run('Demo Wisp');
-  const result = db.prepare(`
-    INSERT INTO monsters (name, latitude, longitude) VALUES (?, ?, ?)
-  `).run('Demo Wisp', latitude + 0.00018, longitude + 0.00018);
-  response.status(201).json({ id: result.lastInsertRowid, message: 'Demo Wisp placed nearby.' });
+/* ---------- game state ---------- */
+// Everything a phone needs: active monsters (with capture status), your totals, leaderboard.
+app.get('/api/state', (req, res) => {
+  const teamId = Number(req.query.teamId) || null;
+  const now = Date.now();
+  const rows = store.monstersWithStatus.all();
+
+  const monsters = rows
+    .filter(m => isActive(m, now) || m.captured_team_id) // show active, plus recently-captured so it can vanish client-side
+    .map(m => ({
+      id: m.id, name: m.name, species: m.species,
+      lat: m.lat, lon: m.lon, points: m.points,
+      end_ms: m.end_ms,
+      captured: m.captured_team_id != null,
+      capturedByYou: teamId != null && m.captured_team_id === teamId,
+      capturedBy: m.captured_team_name || null
+    }));
+
+  const leaderboard = store.leaderboard.all();
+  const me = teamId ? store.teamById.get(teamId) : null;
+  const myRow = leaderboard.find(r => r.id === teamId) || null;
+
+  res.json({
+    now,
+    catchRadius: CATCH_RADIUS_M,
+    team: me ? { id: me.id, name: me.name, points: myRow ? myRow.points : 0, catches: myRow ? myRow.catches : 0 } : null,
+    monsters,
+    leaderboard
+  });
 });
 
-app.post('/api/monsters/:id/capture', (request, response) => {
-  const id = Number(request.params.id);
-  const { latitude, longitude, playerName = 'Guest hunter' } = request.body;
-  if (!Number.isInteger(id) || !isCoordinate(latitude, -90, 90) || !isCoordinate(longitude, -180, 180)) {
-    return response.status(400).json({ error: 'A valid monster and location are required.' });
+/* ---------- capture (server is the referee) ---------- */
+app.post('/api/capture', (req, res) => {
+  const { teamId, monsterId, lat, lon } = req.body || {};
+  const team = teamId ? store.teamById.get(Number(teamId)) : null;
+  if (!team) return res.status(400).json({ error: 'Join a team first.' });
+
+  const m = store.allMonsters.all().find(x => x.id === Number(monsterId));
+  if (!m) return res.status(404).json({ error: 'No such monster.' });
+
+  const now = Date.now();
+  if (!isActive(m, now)) return res.status(410).json({ error: 'That monster is not active right now.' });
+
+  // proximity check (only if the phone sent coordinates)
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    const d = distanceM(lat, lon, m.lat, m.lon);
+    if (d > CATCH_RADIUS_M) {
+      return res.status(422).json({ error: `Too far (${Math.round(d)} m). Get within ${CATCH_RADIUS_M} m.`, distance: Math.round(d) });
+    }
+  } else {
+    return res.status(400).json({ error: 'Missing your location.' });
   }
-  const monster = db.prepare('SELECT * FROM monsters WHERE id = ?').get(id);
-  if (!monster) return response.status(404).json({ error: 'Monster not found.' });
-  if (monster.captured_by) return response.status(409).json({ error: 'That monster was already captured.' });
-  const metersAway = distanceMeters(latitude, longitude, monster.latitude, monster.longitude);
-  if (metersAway > 35) {
-    return response.status(403).json({ error: `Get closer — you are ${Math.round(metersAway)} m away.` });
+
+  // first-team-wins: the PRIMARY KEY on captures.monster_id makes this atomic.
+  try {
+    store.insertCapture.run({
+      monster_id: m.id, team_id: team.id, captured_at: now,
+      lat: Number(lat), lon: Number(lon)
+    });
+  } catch (e) {
+    if (String(e.code).startsWith('SQLITE_CONSTRAINT')) {
+      const existing = store.captureByMonster.get(m.id);
+      const byTeam = existing ? store.teamById.get(existing.team_id) : null;
+      return res.status(409).json({ error: 'Already captured.', capturedBy: byTeam ? byTeam.name : 'another team' });
+    }
+    throw e;
   }
-  db.prepare('UPDATE monsters SET captured_by = ?, captured_at = ? WHERE id = ?')
-    .run(String(playerName).slice(0, 40), new Date().toISOString(), id);
-  response.json({ message: `Captured ${monster.name}!`, metersAway: Math.round(metersAway) });
+
+  const myRow = store.leaderboard.all().find(r => r.id === team.id);
+  res.json({ ok: true, name: m.name, species: m.species, points: m.points,
+             teamPoints: myRow ? myRow.points : m.points });
 });
 
-app.listen(port, '127.0.0.1', () => {
-  console.log(`Monster Hunt is running on http://127.0.0.1:${port}`);
+/* ---------- admin ---------- */
+app.get('/api/admin/dump', requireAdmin, (req, res) => {
+  const now = Date.now();
+  const rows = store.monstersWithStatus.all().map(m => ({
+    id: m.id, name: m.name, species: m.species, lat: m.lat, lon: m.lon,
+    points: m.points, start_ms: m.start_ms, end_ms: m.end_ms,
+    active: isActive(m, now),
+    capturedBy: m.captured_team_name || null
+  }));
+  res.json({ monsters: rows, leaderboard: store.leaderboard.all() });
+});
+
+// Import monsters. body: { monsters:[{name,species?,lat,lon,points?,start_ms?,end_ms?}], mode:'append'|'replace' }
+app.post('/api/admin/import', requireAdmin, (req, res) => {
+  const { monsters, mode } = req.body || {};
+  if (!Array.isArray(monsters) || monsters.length === 0) return res.status(400).json({ error: 'No monsters provided.' });
+
+  const now = Date.now();
+  const insertMany = store.db.transaction((list) => {
+    if (mode === 'replace') { store.clearCaptures.run(); store.clearMonsters.run(); }
+    let n = 0;
+    for (const m of list) {
+      const lat = parseFloat(m.lat), lon = parseFloat(m.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      store.insertMonster.run({
+        name: (m.name || 'Monster').toString().slice(0, 60),
+        species: (m.species || '👾').toString().slice(0, 8),
+        lat, lon,
+        points: Number.isFinite(+m.points) ? Math.round(+m.points) : 10,
+        start_ms: m.start_ms != null ? Math.round(+m.start_ms) : null,
+        end_ms: m.end_ms != null ? Math.round(+m.end_ms) : null,
+        created_at: now
+      });
+      n++;
+    }
+    return n;
+  });
+
+  const added = insertMany(monsters);
+  res.json({ ok: true, added, total: store.allMonsters.all().length });
+});
+
+// Parse a KML string into monster rows (does NOT save; admin reviews then imports).
+app.post('/api/admin/parse-kml', requireAdmin, (req, res) => {
+  const { kml } = req.body || {};
+  const points = parseKml(kml);
+  res.json({ ok: true, count: points.length, points });
+});
+
+// Reset. body: { what: 'captures' | 'all' }
+app.post('/api/admin/reset', requireAdmin, (req, res) => {
+  const what = (req.body && req.body.what) || '';
+  if (what === 'captures') { store.clearCaptures.run(); return res.json({ ok: true, reset: 'captures' }); }
+  if (what === 'all') { store.clearCaptures.run(); store.clearMonsters.run(); return res.json({ ok: true, reset: 'all' }); }
+  res.status(400).json({ error: "Specify what: 'captures' or 'all'." });
+});
+
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+
+app.listen(PORT, HOST, () => {
+  console.log(`Monster Hunt listening on http://${HOST}:${PORT}`);
+  if (!ADMIN_KEY) console.log('WARNING: no ADMIN_KEY set — admin endpoints are disabled until you create .env');
 });

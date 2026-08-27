@@ -1,15 +1,14 @@
 {
   "name": "monster-hunt",
-  "version": "0.1.0",
-  "private": true,
-  "description": "GPS monster hunt prototype",
+  "version": "1.0.0",
+  "description": "GPS + camera-AR creature hunt for a private property, with teams, points, time-windowed monsters, and a live leaderboard.",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "better-sqlite3": "^12.8.0",
-    "express": "^5.1.0"
+    "better-sqlite3": "^12.11.1",
+    "express": "^4.21.2"
   }
 }

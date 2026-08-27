@@ -1,0 +1,16 @@
+# Copy to /etc/systemd/system/monster-hunt.service
+# Confirm node path with: which node   (update ExecStart if not /usr/bin/node)
+[Unit]
+Description=Monster Hunt game server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/monster-hunt
+ExecStart=/usr/bin/node server.js
+Environment=NODE_ENV=production
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# APPEND to /etc/caddy/Caddyfile. Caddy auto-issues HTTPS for this subdomain.
+# The app runs on 127.0.0.1:3000 and is never exposed directly.
+game.qrcritter.com {
+    reverse_proxy 127.0.0.1:3000
+}
