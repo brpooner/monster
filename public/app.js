@@ -6,15 +6,14 @@ let teamName = localStorage.getItem(LS.name) || '';
 const $ = id => document.getElementById(id);
 
 /* ---------- state ---------- */
-const YPM = 1.0936133;                 // yards per meter
-let here = null, gpsAcc = null, heading = null, headingAcc = null, tilt = null;
+const YPM = 1.0936133;
+let here = null, gpsAcc = null, heading = null, headingAcc = null;
 let serverState = null, active = null;
 let catchRadiusM = 27.43, catchRadiusYd = 30;
-let mode = 'map';                      // 'map' | 'compass' | 'capture'
-let lastView = 'map';                  // remembered non-capture view
-let camStream = null, busy = false;
-let map = null, meMarker = null, meAcc = null, meRing = null, monMarkers = {}, followMe = true;
-const NEAR = 7, FOV = 64, UP_MIN = 45, UP_MAX = 135;
+let mode = 'compass';          // actual visible mode: compass | map | capture | rest
+let userView = 'compass';      // what the player chose while hunting: compass | map
+let camStream = null, busy = false, capturing = false;
+let map = null, meMarker = null, meRing = null, monMarkers = {}, followMe = true;
 
 /* ---------- geo ---------- */
 const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
@@ -56,7 +55,6 @@ if (teamId && teamName) showStart();
 /* ---------- start hunt ---------- */
 $('startBtn').addEventListener('click', async () => {
   $('startErr').textContent = '';
-  // secure camera permission up front, then release it to save battery until capture
   try {
     const s = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' }, audio:false });
     s.getTracks().forEach(t => t.stop());
@@ -76,7 +74,7 @@ $('startBtn').addEventListener('click', async () => {
   $('hud').classList.remove('hidden');
   $('teamName').textContent = teamName;
   initMap();
-  setMode('map');
+  applyMode('compass');
   pollState(); setInterval(pollState, 4000);
   requestAnimationFrame(loop);
 });
@@ -85,22 +83,15 @@ function onOrient(e) {
   let h = null;
   if (typeof e.webkitCompassHeading === 'number') { h = e.webkitCompassHeading; headingAcc = e.webkitCompassAccuracy; }
   else if (typeof e.alpha === 'number') { h = (360 - e.alpha) % 360; }
-  if (h != null) { heading = h; $('gps'); }
-  if (typeof e.beta === 'number') tilt = e.beta;
+  if (h != null) heading = h;
 }
 
-/* ---------- camera on/off ---------- */
+/* ---------- camera ---------- */
 async function startCamera() {
   if (camStream) return;
-  try {
-    camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' }, audio:false });
-    $('cam').srcObject = camStream;
-  } catch (_) {}
+  try { camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' }, audio:false }); $('cam').srcObject = camStream; } catch(_){}
 }
-function stopCamera() {
-  if (!camStream) return;
-  camStream.getTracks().forEach(t => t.stop()); camStream = null; $('cam').srcObject = null;
-}
+function stopCamera() { if (camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream=null; $('cam').srcObject=null; } }
 
 /* ---------- map ---------- */
 function initMap() {
@@ -115,7 +106,7 @@ function updateMeOnMap() {
     meMarker = L.marker(ll, { icon: L.divIcon({ className:'', html:'<div class="me-dot"></div>', iconSize:[18,18], iconAnchor:[9,9] }) }).addTo(map);
     meRing = L.circle(ll, { radius: catchRadiusM, color:'#7dff9b', weight:1, fillColor:'#7dff9b', fillOpacity:.08 }).addTo(map);
   } else { meMarker.setLatLng(ll); meRing.setLatLng(ll); }
-  if (followMe) map.setView(ll, map.getZoom(), { animate:true });
+  if (followMe && mode === 'map') map.setView(ll, map.getZoom(), { animate:true });
 }
 function refreshMonMarkers() {
   if (!map || !serverState) return;
@@ -123,34 +114,36 @@ function refreshMonMarkers() {
   for (const m of serverState.monsters) {
     if (m.captured) continue;
     live[m.id] = true;
-    if (monMarkers[m.id]) { monMarkers[m.id].setLatLng([m.lat, m.lon]); }
-    else {
-      monMarkers[m.id] = L.marker([m.lat, m.lon], {
-        icon: L.divIcon({ className:'', html:`<div class="mon-pin">${m.species||'👾'}</div>`, iconSize:[34,34], iconAnchor:[17,17] })
-      }).addTo(map).bindPopup(`${esc(m.name)} · ${m.points} pts`);
-    }
+    if (monMarkers[m.id]) monMarkers[m.id].setLatLng([m.lat, m.lon]);
+    else monMarkers[m.id] = L.marker([m.lat, m.lon], {
+      icon: L.divIcon({ className:'', html:`<div class="mon-pin">${m.species||'👾'}</div>`, iconSize:[34,34], iconAnchor:[17,17] })
+    }).addTo(map).bindPopup(`${esc(m.name)} · ${m.points} pts`);
   }
   for (const id in monMarkers) if (!live[id]) { map.removeLayer(monMarkers[id]); delete monMarkers[id]; }
 }
 
-/* ---------- mode switching ---------- */
-function setMode(m) {
+/* ---------- mode application ---------- */
+function applyMode(m) {
+  if (m === mode) return;
   mode = m;
-  const showMap = m === 'map', showCx = m === 'compass', showCap = m === 'capture';
-  $('map').classList.toggle('hidden', !showMap);
-  $('compass').classList.toggle('hidden', !showCx);
-  $('cam').classList.toggle('hidden', !showCap);
-  $('scrim').classList.toggle('hidden', !showCap);
-  $('capHud').classList.toggle('hidden', !showCap);
-  $('modeBtn').style.display = showCap ? 'none' : 'block';
-  $('modeBtn').textContent = showMap ? 'Compass ›' : '‹ Map';
-  if (showMap) { followMe = true; setTimeout(() => map && map.invalidateSize(), 60); updateMeOnMap(); refreshMonMarkers(); }
-  if (showCap) startCamera(); else stopCamera();
+  const isMap = m==='map', isCx = m==='compass', isCap = m==='capture', isRest = m==='rest';
+  $('compass').classList.toggle('hidden', !isCx);
+  $('map').classList.toggle('hidden', !isMap);
+  $('rest').classList.toggle('hidden', !isRest);
+  $('cam').classList.toggle('hidden', !isCap);
+  $('scrim').classList.toggle('hidden', !isCap);
+  $('capHud').classList.toggle('hidden', !isCap);
+  // mode toggle only makes sense while actively hunting (compass/map)
+  $('modeBtn').style.display = (isCap || isRest) ? 'none' : 'block';
+  $('modeBtn').textContent = isMap ? '‹ Compass' : 'Map ›';
+  if (isMap) { followMe = true; setTimeout(() => map && map.invalidateSize(), 60); updateMeOnMap(); refreshMonMarkers(); }
+  if (isCap) { startCamera(); } else { stopCamera(); hideMon(); }
+  if (isRest) renderRest();
 }
 $('modeBtn').addEventListener('click', () => {
-  if (mode === 'capture') return;
-  lastView = (mode === 'map') ? 'compass' : 'map';
-  setMode(lastView);
+  if (mode === 'capture' || mode === 'rest') return;
+  userView = (mode === 'compass') ? 'map' : 'compass';
+  applyMode(userView);
 });
 
 /* ---------- server sync ---------- */
@@ -162,7 +155,7 @@ async function pollState() {
     catchRadiusM  = serverState.catchRadiusM || (catchRadiusYd / YPM);
     if (meRing) meRing.setRadius(catchRadiusM);
     if (serverState.team) $('score').textContent = serverState.team.points;
-    refreshMonMarkers(); renderBoardIfOpen(); renderDexIfOpen();
+    refreshMonMarkers(); renderBoardIfOpen(); renderDexIfOpen(); if (mode==='rest') renderRest();
   } catch (_) {}
 }
 function uncaught() { return serverState ? serverState.monsters.filter(m => !m.captured) : []; }
@@ -173,29 +166,30 @@ function loop() {
   if (!serverState) { $('near').textContent = '…'; return; }
   const rem = uncaught();
 
-  if (!here || rem.length === 0) {
-    $('near').textContent = rem.length ? 'GPS…' : 'none';
-    if (mode === 'capture') setMode(lastView);
-    if (mode === 'compass') { $('cxName').textContent = rem.length ? 'Waiting for GPS' : 'No creatures active'; $('cxDist').textContent = '— yds'; }
-    return;
-  }
+  // Case 2: nothing active -> standings
+  if (rem.length === 0) { $('near').textContent = 'none'; capturing = false; applyMode('rest'); return; }
 
-  // nearest
+  if (!here) { $('near').textContent = 'GPS…'; if (mode==='capture'){ capturing=false; applyMode(userView);} if (mode==='rest') applyMode(userView); return; }
+
+  // nearest creature
   let best = null, bd = Infinity;
   for (const m of rem) { const d = distM(here, m); if (d < bd) { bd = d; best = m; } }
   active = best;
-  const bearingTo = bearing(here, best);
+  const brg = bearing(here, best);
   $('near').textContent = best.name + ' · ' + yards(bd) + 'yd';
 
-  // auto in/out of capture
-  if (bd <= catchRadiusM && mode !== 'capture') setMode('capture');
-  else if (bd > catchRadiusM && mode === 'capture') setMode(lastView);
+  // capture with hysteresis to avoid boundary flicker
+  if (!capturing && bd <= catchRadiusM) capturing = true;
+  else if (capturing && bd > catchRadiusM * 1.25) capturing = false;
 
-  if (mode === 'compass') renderCompass(best, bearingTo, bd);
-  else if (mode === 'capture') renderCapture(best, bearingTo, bd);
+  if (capturing) { if (mode !== 'capture') applyMode('capture'); renderCapture(best); }
+  else {
+    if (mode === 'capture' || mode === 'rest') applyMode(userView);
+    if (mode === 'compass') renderCompass(best, brg, bd);
+  }
 }
 
-/* ---------- compass render ---------- */
+/* ---------- compass ---------- */
 function renderCompass(m, brg, d) {
   $('cxName').innerHTML = 'Nearest: <b>' + esc(m.name) + '</b> · ' + m.points + ' pts';
   $('cxDist').textContent = yards(d) + ' yds';
@@ -204,24 +198,18 @@ function renderCompass(m, brg, d) {
   if (heading != null) $('cxArrow').style.transform = 'rotate(' + angDiff(brg, heading) + 'deg)';
 }
 
-/* ---------- capture render (camera) ---------- */
-function renderCapture(m, brg, d) {
-  const upright = tilt != null && tilt > UP_MIN && tilt < UP_MAX;
-  if (!upright) { hideMon(); $('capHint').textContent = 'Raise your phone like a window'; return; }
-  if (d <= NEAR) { showMon(m, 50, 50); $('capHint').textContent = "It's right here — tap it!"; return; }
-  if (heading == null) { showMon(m, 50, 50); $('capHint').textContent = 'Tap the creature to catch'; return; }
-  const err = angDiff(brg, heading);
-  if (Math.abs(err) < FOV/2) { showMon(m, 50 + (err/(FOV/2))*46, 48); $('capHint').textContent = 'Tap it to catch'; }
-  else { hideMon(); $('capHint').textContent = (err > 0 ? 'Turn right →' : '← Turn left') + ' to face it'; }
-}
-function showMon(m, x, y) {
-  const el = $('mon'); el.style.display='flex'; el.style.left=x+'%'; el.style.top=y+'%';
-  $('monBody').textContent = m.species || '👾'; $('monTag').textContent = m.name;
-  $('catchBtn').style.display = 'block';
+/* ---------- capture (camera, monster centered, no aim gating) ---------- */
+function renderCapture(m) {
+  const el = $('mon');
+  if (el.style.display !== 'flex') {
+    el.style.display='flex'; el.style.left='50%'; el.style.top='48%';
+    $('monBody').textContent = m.species || '👾'; $('monTag').textContent = m.name;
+    $('catchBtn').style.display='block';
+  }
+  $('capHint').textContent = 'Tap the creature to catch — ' + m.points + ' pts';
 }
 function hideMon(){ $('mon').style.display='none'; $('catchBtn').style.display='none'; }
 
-/* ---------- capture action ---------- */
 async function doCatch() {
   if (!active || busy || !here) return;
   busy = true;
@@ -233,8 +221,8 @@ async function doCatch() {
       celebrate(d.species, d.name, d.points); $('score').textContent = d.teamPoints;
       const hit = serverState.monsters.find(x => x.id === active.id); if (hit){ hit.captured=true; hit.capturedByYou=true; }
       if (monMarkers[active.id]) { map.removeLayer(monMarkers[active.id]); delete monMarkers[active.id]; }
-      hideMon(); pollState();
-    } else if (r.status === 409) { $('capHint').textContent = 'Too slow — ' + (d.capturedBy||'another team') + ' got it!'; pollState(); }
+      capturing = false; hideMon(); applyMode(userView); pollState();
+    } else if (r.status === 409) { $('capHint').textContent = 'Too slow — ' + (d.capturedBy||'another team') + ' got it!'; capturing=false; pollState(); }
     else { $('capHint').textContent = d.error || 'Could not catch that.'; }
   } catch (_) { $('capHint').textContent = 'Network error.'; }
   finally { busy = false; }
@@ -247,17 +235,26 @@ function celebrate(em, name, pts) {
   const t = $('toast'); t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1500);
 }
 
-/* ---------- panels ---------- */
+/* ---------- standings / panels ---------- */
+function standingsHTML() {
+  const lb = (serverState && serverState.leaderboard) || [];
+  return lb.map((t,i) =>
+    `<div class="row ${String(t.id)===String(teamId)?'me':''}"><div class="rank">${i+1}</div>
+     <div class="nm">${esc(t.name)}</div><div class="pts">${t.points}<span class="cnt">${t.catches}🐾</span></div></div>`
+  ).join('') || '<div class="sub">No teams yet.</div>';
+}
+function renderRest() {
+  const anyMonsters = serverState && serverState.monsters.length > 0;
+  $('restTitle').textContent = anyMonsters ? 'All creatures caught! 🎉' : 'No creatures active right now';
+  $('restList').innerHTML = standingsHTML();
+}
 $('boardBtn').addEventListener('click', () => { $('board').style.display='flex'; renderBoardIfOpen(); });
 $('boardClose').addEventListener('click', () => { $('board').style.display='none'; });
 function renderBoardIfOpen() {
   if ($('board').style.display !== 'flex' || !serverState) return;
   const lb = serverState.leaderboard || [];
   $('boardSub').textContent = lb.length + ' team' + (lb.length===1?'':'s') + ' · live';
-  $('boardList').innerHTML = lb.map((t,i) =>
-    `<div class="row ${String(t.id)===String(teamId)?'me':''}"><div class="rank">${i+1}</div>
-     <div class="nm">${esc(t.name)}</div><div class="pts">${t.points}<span class="cnt">${t.catches}🐾</span></div></div>`
-  ).join('') || '<div class="sub">No teams yet.</div>';
+  $('boardList').innerHTML = standingsHTML();
 }
 $('dexBtn').addEventListener('click', () => { $('dex').style.display='flex'; renderDexIfOpen(); });
 $('dexClose').addEventListener('click', () => { $('dex').style.display='none'; });
