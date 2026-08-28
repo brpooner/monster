@@ -9,11 +9,12 @@ const $ = id => document.getElementById(id);
 const YPM = 1.0936133;
 let here = null, gpsAcc = null, heading = null, headingAcc = null;
 let serverState = null, active = null;
+let absoluteSeen = false, smoothHeading = null, arrowDeg = 0;
 let catchRadiusM = 27.43, catchRadiusYd = 30;
 let mode = 'compass';          // actual visible mode: compass | map | capture | rest
 let userView = 'compass';      // what the player chose while hunting: compass | map
 let camStream = null, busy = false, capturing = false;
-let map = null, meMarker = null, meRing = null, monMarkers = {}, followMe = true;
+let map = null, mapReady = false, meMarker = null, meRing = null, monMarkers = {}, followMe = true;
 
 /* ---------- geo ---------- */
 const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
@@ -73,17 +74,25 @@ $('startBtn').addEventListener('click', async () => {
   $('startScreen').classList.add('hidden');
   $('hud').classList.remove('hidden');
   $('teamName').textContent = teamName;
-  initMap();
   applyMode('compass');
   pollState(); setInterval(pollState, 4000);
   requestAnimationFrame(loop);
 });
 
 function onOrient(e) {
+  // Use ONE compass source. Android fires both 'deviceorientationabsolute'
+  // (true north) and 'deviceorientation' (relative) — mixing them causes violent twitching.
+  if (e.type === 'deviceorientationabsolute') absoluteSeen = true;
   let h = null;
-  if (typeof e.webkitCompassHeading === 'number') { h = e.webkitCompassHeading; headingAcc = e.webkitCompassAccuracy; }
-  else if (typeof e.alpha === 'number') { h = (360 - e.alpha) % 360; }
-  if (h != null) heading = h;
+  if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;            // iOS
+  else if (e.type === 'deviceorientationabsolute' && typeof e.alpha === 'number') h = (360 - e.alpha) % 360;
+  else if (!absoluteSeen && typeof e.alpha === 'number') h = (360 - e.alpha) % 360;        // fallback only
+  else return;
+  if (typeof e.webkitCompassAccuracy === 'number') headingAcc = e.webkitCompassAccuracy;
+  // circular low-pass smoothing
+  if (smoothHeading == null) smoothHeading = h;
+  else smoothHeading = (smoothHeading + angDiff(h, smoothHeading) * 0.25 + 360) % 360;
+  heading = smoothHeading;
 }
 
 /* ---------- camera ---------- */
@@ -94,10 +103,12 @@ async function startCamera() {
 function stopCamera() { if (camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream=null; $('cam').srcObject=null; } }
 
 /* ---------- map ---------- */
-function initMap() {
+function ensureMap() {
+  if (mapReady) return;
   map = L.map('map', { zoomControl:false, attributionControl:false }).setView([41.111966,-83.213732], 17);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19 }).addTo(map);
   map.on('dragstart', () => { followMe = false; });
+  mapReady = true;
 }
 function updateMeOnMap() {
   if (!map || !here) return;
@@ -136,7 +147,12 @@ function applyMode(m) {
   // mode toggle only makes sense while actively hunting (compass/map)
   $('modeBtn').style.display = (isCap || isRest) ? 'none' : 'block';
   $('modeBtn').textContent = isMap ? '‹ Compass' : 'Map ›';
-  if (isMap) { followMe = true; setTimeout(() => map && map.invalidateSize(), 60); updateMeOnMap(); refreshMonMarkers(); }
+  if (isMap) {
+    ensureMap(); followMe = true;
+    setTimeout(() => { map.invalidateSize(); updateMeOnMap(); }, 60);
+    setTimeout(() => map.invalidateSize(), 350);
+    updateMeOnMap(); refreshMonMarkers();
+  }
   if (isCap) { startCamera(); } else { stopCamera(); hideMon(); }
   if (isRest) renderRest();
 }
@@ -195,7 +211,12 @@ function renderCompass(m, brg, d) {
   $('cxDist').textContent = yards(d) + ' yds';
   const bad = heading == null || (typeof headingAcc === 'number' && (headingAcc < 0 || headingAcc > 20));
   $('cxCal').classList.toggle('hidden', !bad);
-  if (heading != null) $('cxArrow').style.transform = 'rotate(' + angDiff(brg, heading) + 'deg)';
+  if (heading != null) {
+    const target = angDiff(brg, heading);
+    let delta = ((target - arrowDeg + 540) % 360) - 180;
+    arrowDeg += delta * 0.3;                       // ease toward target, shortest way
+    $('cxArrow').style.transform = 'rotate(' + arrowDeg + 'deg)';
+  }
 }
 
 /* ---------- capture (camera, monster centered, no aim gating) ---------- */
