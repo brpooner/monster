@@ -46,6 +46,7 @@ $('parseBtn').addEventListener('click', async () => {
 });
 
 function renderPreview() {
+  if (typeof syncPins === 'function') syncPins();
   $('prevTable').style.display = ''; $('importBtns').style.display = 'flex';
   $('prevBody').innerHTML = parsed.map((m, i) => `
     <tr>
@@ -110,5 +111,66 @@ $('resetAll').addEventListener('click', async () => {
   try { await api('/api/admin/reset', { what: 'all' }); $('resetMsg').className = 'msg ok'; $('resetMsg').textContent = 'Everything wiped.'; loadState(); }
   catch (e) { $('resetMsg').className = 'msg bad'; $('resetMsg').textContent = e.message; }
 });
+
+
+/* ---------- placement map (satellite/streets, tap to drop) ---------- */
+let amap, pins, satLayer, streetLayer;
+function initAdminMap() {
+  satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 20, attribution: 'Imagery © Esri' });
+  streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '© OpenStreetMap' });
+  amap = L.map('amap', { zoomControl: true }).setView([41.111966, -83.213732], 16);
+  satLayer.addTo(amap);
+  pins = L.layerGroup().addTo(amap);
+  amap.on('click', onMapClick);
+  setTimeout(() => amap.invalidateSize(), 200);
+}
+$('satBtn').addEventListener('click', () => { amap.removeLayer(streetLayer); satLayer.addTo(amap); });
+$('streetBtn').addEventListener('click', () => { amap.removeLayer(satLayer); streetLayer.addTo(amap); });
+$('findMe').addEventListener('click', () => {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(p => amap.setView([p.coords.latitude, p.coords.longitude], 18),
+    () => alert('Could not get your location.'), { enableHighAccuracy: true });
+});
+$('clearPlaced').addEventListener('click', () => { parsed = []; syncPins(); renderPreview(); });
+
+function randomFromPool() {
+  try {
+    const pool = JSON.parse($('pool').value);
+    if (Array.isArray(pool) && pool.length) {
+      const p = pool[Math.floor(Math.random() * pool.length)];
+      return { name: p.name || 'Monster', species: p.emoji || p.species || '👾', points: +p.points || 10 };
+    }
+  } catch (_) {}
+  return null;
+}
+function onMapClick(e) {
+  const lat = +e.latlng.lat.toFixed(6), lon = +e.latlng.lng.toFixed(6);
+  let m;
+  if ($('rndOn').checked) {
+    m = randomFromPool() || { name: 'Monster', species: $('species').value || '👾', points: parseInt($('points').value, 10) || 10 };
+  } else {
+    const nm = prompt('Monster name for this spot?', 'Monster ' + (parsed.length + 1));
+    if (nm === null) return;
+    m = { name: nm || ('Monster ' + (parsed.length + 1)), species: $('species').value || '👾', points: parseInt($('points').value, 10) || 10 };
+  }
+  parsed.push({ ...m, lat, lon });
+  syncPins(); renderPreview();
+}
+// redraw all pins from the current parsed[] so map + preview always match
+function syncPins() {
+  if (!pins) return;
+  pins.clearLayers();
+  parsed.forEach((m, i) => {
+    if (!Number.isFinite(m.lat) || !Number.isFinite(m.lon)) return;
+    const mk = L.marker([m.lat, m.lon], {
+      icon: L.divIcon({ className: '', html: `<div class="mon-pin">${esc(m.species || '👾')}</div>`, iconSize: [30,30], iconAnchor: [15,15] })
+    }).bindTooltip(`${esc(m.name)} · ${m.points}pts (tap to remove)`);
+    mk.on('click', () => { parsed.splice(i, 1); syncPins(); renderPreview(); });
+    pins.addLayer(mk);
+  });
+}
+window.addEventListener('load', initAdminMap);
 
 function esc(t) { return String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }

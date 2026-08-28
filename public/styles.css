@@ -115,3 +115,7 @@ button{font-family:inherit;cursor:pointer;}
 #toast.show{opacity:1;transform:translate(-50%,-50%) scale(1);}
 #toast .em{font-size:60px;} #toast .t{font-size:20px;font-weight:800;margin-top:4px;}
 #toast .s{font-size:13px;color:var(--amber);letter-spacing:.14em;text-transform:uppercase;margin-top:4px;}
+
+.recenter{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 22px);left:50%;transform:translateX(-50%);
+  pointer-events:auto;background:rgba(5,20,12,.8);border:1px solid rgba(125,255,155,.4);color:var(--signal);
+  border-radius:999px;padding:11px 22px;font-size:14px;font-weight:700;letter-spacing:.04em;backdrop-filter:blur(6px);}

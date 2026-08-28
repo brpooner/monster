@@ -146,11 +146,13 @@ function applyMode(m) {
   $('capHud').classList.toggle('hidden', !isCap);
   // mode toggle only makes sense while actively hunting (compass/map)
   $('modeBtn').style.display = (isCap || isRest) ? 'none' : 'block';
+  $('recenter').style.display = isMap ? 'block' : 'none';
   $('modeBtn').textContent = isMap ? '‹ Compass' : 'Map ›';
   if (isMap) {
     ensureMap(); followMe = true;
     setTimeout(() => { map.invalidateSize(); updateMeOnMap(); }, 60);
     setTimeout(() => map.invalidateSize(), 350);
+    setTimeout(() => map.invalidateSize(), 900);
     updateMeOnMap(); refreshMonMarkers();
   }
   if (isCap) { startCamera(); } else { stopCamera(); hideMon(); }
@@ -287,5 +289,17 @@ function renderDexIfOpen() {
     `<div class="row dexrow"><div class="em">${m.species||'👾'}</div><div class="nm">${esc(m.name)}<div class="st">+${m.points} pts</div></div></div>`
   ).join('') || '<div class="sub">Nothing yet — go catch something!</div>';
 }
+
+
+/* ---------- map recenter / resize safety ---------- */
+$('recenter').addEventListener('click', () => {
+  if (!map) return;
+  map.invalidateSize();
+  followMe = true;
+  if (here) map.setView([here.lat, here.lon], 17, { animate:true });
+});
+function kickMapSize(){ if (map && mode==='map'){ map.invalidateSize(); if (followMe && here) map.setView([here.lat,here.lon], map.getZoom()); } }
+window.addEventListener('resize', kickMapSize);
+window.addEventListener('orientationchange', () => setTimeout(kickMapSize, 300));
 
 function esc(t){ return String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
