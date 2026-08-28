@@ -22,7 +22,9 @@ const { parseKml } = require('./kml');
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const CATCH_RADIUS_M = Number(process.env.CATCH_RADIUS_M || 30); // server-authoritative
+const YARDS_PER_M = 1.0936133;
+const CATCH_RADIUS_YD = Number(process.env.CATCH_RADIUS_YD || 30); // server-authoritative
+const CATCH_RADIUS_M = CATCH_RADIUS_YD / YARDS_PER_M;
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -89,7 +91,8 @@ app.get('/api/state', (req, res) => {
 
   res.json({
     now,
-    catchRadius: CATCH_RADIUS_M,
+    catchRadiusYd: CATCH_RADIUS_YD,
+    catchRadiusM: CATCH_RADIUS_M,
     team: me ? { id: me.id, name: me.name, points: myRow ? myRow.points : 0, catches: myRow ? myRow.catches : 0 } : null,
     monsters,
     leaderboard
@@ -112,7 +115,8 @@ app.post('/api/capture', (req, res) => {
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
     const d = distanceM(lat, lon, m.lat, m.lon);
     if (d > CATCH_RADIUS_M) {
-      return res.status(422).json({ error: `Too far (${Math.round(d)} m). Get within ${CATCH_RADIUS_M} m.`, distance: Math.round(d) });
+      const yd = Math.round(d * YARDS_PER_M);
+      return res.status(422).json({ error: `Too far (${yd} yds). Get within ${CATCH_RADIUS_YD} yds.`, distanceYd: yd });
     }
   } else {
     return res.status(400).json({ error: 'Missing your location.' });

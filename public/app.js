@@ -1,22 +1,22 @@
 'use strict';
-/* ---------- persistent identity ---------- */
+/* ---------- identity ---------- */
 const LS = { team: 'wildscan.teamId', name: 'wildscan.teamName' };
 let teamId = localStorage.getItem(LS.team);
 let teamName = localStorage.getItem(LS.name) || '';
-
-/* ---------- element refs ---------- */
 const $ = id => document.getElementById(id);
-const gate = $('gate'), startScreen = $('startScreen');
 
 /* ---------- state ---------- */
-let here = null, gpsAcc = null, heading = null, tilt = null;
-let serverState = null;     // last /api/state response
-let active = null;          // creature currently targeted/rendered
-let catchRadius = 30;
-const NEAR = 8, FOV = 64, UP_MIN = 45, UP_MAX = 135;
-let busy = false;
+const YPM = 1.0936133;                 // yards per meter
+let here = null, gpsAcc = null, heading = null, headingAcc = null, tilt = null;
+let serverState = null, active = null;
+let catchRadiusM = 27.43, catchRadiusYd = 30;
+let mode = 'map';                      // 'map' | 'compass' | 'capture'
+let lastView = 'map';                  // remembered non-capture view
+let camStream = null, busy = false;
+let map = null, meMarker = null, meAcc = null, meRing = null, monMarkers = {}, followMe = true;
+const NEAR = 7, FOV = 64, UP_MIN = 45, UP_MAX = 135;
 
-/* ---------- geo math ---------- */
+/* ---------- geo ---------- */
 const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
 function distM(a, b) {
   const R = 6371000, dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
@@ -30,18 +30,15 @@ function bearing(a, b) {
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 const angDiff = (a, b) => ((a - b + 540) % 360) - 180;
+const yards = m => Math.round(m * YPM);
 
 /* ---------- team join ---------- */
 $('joinBtn').addEventListener('click', async () => {
-  const name = $('team').value.trim();
-  const pin = $('pin').value.trim();
+  const name = $('team').value.trim(), pin = $('pin').value.trim();
   $('joinErr').textContent = '';
   if (!name) { $('joinErr').textContent = 'Enter a team name.'; return; }
   try {
-    const r = await fetch('/api/team', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, pin })
-    });
+    const r = await fetch('/api/team', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, pin }) });
     const d = await r.json();
     if (!r.ok) { $('joinErr').textContent = d.error || 'Could not join.'; return; }
     teamId = String(d.teamId); teamName = d.name;
@@ -49,195 +46,228 @@ $('joinBtn').addEventListener('click', async () => {
     showStart();
   } catch (e) { $('joinErr').textContent = 'Network error — are you online?'; }
 });
-
-function showStart() {
-  gate.classList.add('hidden');
-  startScreen.classList.remove('hidden');
-  $('helloTeam').textContent = teamName;
-}
+function showStart(){ $('gate').classList.add('hidden'); $('startScreen').classList.remove('hidden'); $('helloTeam').textContent = teamName; }
 $('switchTeam').addEventListener('click', () => {
-  localStorage.removeItem(LS.team); localStorage.removeItem(LS.name);
-  teamId = null; teamName = '';
-  startScreen.classList.add('hidden'); gate.classList.remove('hidden');
-  $('team').value = ''; $('pin').value = '';
+  localStorage.removeItem(LS.team); localStorage.removeItem(LS.name); teamId=null; teamName='';
+  $('startScreen').classList.add('hidden'); $('gate').classList.remove('hidden'); $('team').value=''; $('pin').value='';
 });
-
-// returning player: skip the name entry
 if (teamId && teamName) showStart();
 
-/* ---------- start the hunt ---------- */
+/* ---------- start hunt ---------- */
 $('startBtn').addEventListener('click', async () => {
   $('startErr').textContent = '';
-  // camera
+  // secure camera permission up front, then release it to save battery until capture
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-    $('cam').srcObject = stream;
+    const s = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' }, audio:false });
+    s.getTracks().forEach(t => t.stop());
   } catch (e) { $('startErr').textContent = 'Camera blocked. Allow camera access and try again.'; return; }
-
-  // motion / orientation (iOS asks permission on a tap)
-  try {
-    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
-      await DeviceOrientationEvent.requestPermission();
-    }
-  } catch (_) {}
+  try { if (DeviceOrientationEvent?.requestPermission) await DeviceOrientationEvent.requestPermission(); } catch(_){}
   window.addEventListener('deviceorientationabsolute', onOrient, true);
   window.addEventListener('deviceorientation', onOrient, true);
 
-  // gps
   if ('geolocation' in navigator) {
     navigator.geolocation.watchPosition(p => {
-      here = { lat: p.coords.latitude, lon: p.coords.longitude };
-      gpsAcc = Math.round(p.coords.accuracy);
-      $('gps').textContent = '±' + gpsAcc + 'm';
-    }, () => { $('gps').textContent = 'off'; }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+      here = { lat:p.coords.latitude, lon:p.coords.longitude }; gpsAcc = Math.round(p.coords.accuracy);
+      $('gps').textContent = '±' + gpsAcc + 'm'; updateMeOnMap();
+    }, () => { $('gps').textContent = 'off'; }, { enableHighAccuracy:true, maximumAge:1000, timeout:20000 });
   }
 
-  startScreen.classList.add('hidden');
-  ['cam', 'scrim', 'hud'].forEach(id => $(id).classList.remove('hidden'));
+  $('startScreen').classList.add('hidden');
+  $('hud').classList.remove('hidden');
   $('teamName').textContent = teamName;
-
-  pollState(); setInterval(pollState, 4000);   // sync with server (others' captures, leaderboard)
+  initMap();
+  setMode('map');
+  pollState(); setInterval(pollState, 4000);
   requestAnimationFrame(loop);
 });
 
 function onOrient(e) {
   let h = null;
-  if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;       // iOS true heading
-  else if (typeof e.alpha === 'number') h = (360 - e.alpha) % 360;                  // Android
-  if (h != null) { heading = h; $('hd').textContent = Math.round(h) + '°'; }
+  if (typeof e.webkitCompassHeading === 'number') { h = e.webkitCompassHeading; headingAcc = e.webkitCompassAccuracy; }
+  else if (typeof e.alpha === 'number') { h = (360 - e.alpha) % 360; }
+  if (h != null) { heading = h; $('gps'); }
   if (typeof e.beta === 'number') tilt = e.beta;
 }
+
+/* ---------- camera on/off ---------- */
+async function startCamera() {
+  if (camStream) return;
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment' }, audio:false });
+    $('cam').srcObject = camStream;
+  } catch (_) {}
+}
+function stopCamera() {
+  if (!camStream) return;
+  camStream.getTracks().forEach(t => t.stop()); camStream = null; $('cam').srcObject = null;
+}
+
+/* ---------- map ---------- */
+function initMap() {
+  map = L.map('map', { zoomControl:false, attributionControl:false }).setView([41.111966,-83.213732], 17);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19 }).addTo(map);
+  map.on('dragstart', () => { followMe = false; });
+}
+function updateMeOnMap() {
+  if (!map || !here) return;
+  const ll = [here.lat, here.lon];
+  if (!meMarker) {
+    meMarker = L.marker(ll, { icon: L.divIcon({ className:'', html:'<div class="me-dot"></div>', iconSize:[18,18], iconAnchor:[9,9] }) }).addTo(map);
+    meRing = L.circle(ll, { radius: catchRadiusM, color:'#7dff9b', weight:1, fillColor:'#7dff9b', fillOpacity:.08 }).addTo(map);
+  } else { meMarker.setLatLng(ll); meRing.setLatLng(ll); }
+  if (followMe) map.setView(ll, map.getZoom(), { animate:true });
+}
+function refreshMonMarkers() {
+  if (!map || !serverState) return;
+  const live = {};
+  for (const m of serverState.monsters) {
+    if (m.captured) continue;
+    live[m.id] = true;
+    if (monMarkers[m.id]) { monMarkers[m.id].setLatLng([m.lat, m.lon]); }
+    else {
+      monMarkers[m.id] = L.marker([m.lat, m.lon], {
+        icon: L.divIcon({ className:'', html:`<div class="mon-pin">${m.species||'👾'}</div>`, iconSize:[34,34], iconAnchor:[17,17] })
+      }).addTo(map).bindPopup(`${esc(m.name)} · ${m.points} pts`);
+    }
+  }
+  for (const id in monMarkers) if (!live[id]) { map.removeLayer(monMarkers[id]); delete monMarkers[id]; }
+}
+
+/* ---------- mode switching ---------- */
+function setMode(m) {
+  mode = m;
+  const showMap = m === 'map', showCx = m === 'compass', showCap = m === 'capture';
+  $('map').classList.toggle('hidden', !showMap);
+  $('compass').classList.toggle('hidden', !showCx);
+  $('cam').classList.toggle('hidden', !showCap);
+  $('scrim').classList.toggle('hidden', !showCap);
+  $('capHud').classList.toggle('hidden', !showCap);
+  $('modeBtn').style.display = showCap ? 'none' : 'block';
+  $('modeBtn').textContent = showMap ? 'Compass ›' : '‹ Map';
+  if (showMap) { followMe = true; setTimeout(() => map && map.invalidateSize(), 60); updateMeOnMap(); refreshMonMarkers(); }
+  if (showCap) startCamera(); else stopCamera();
+}
+$('modeBtn').addEventListener('click', () => {
+  if (mode === 'capture') return;
+  lastView = (mode === 'map') ? 'compass' : 'map';
+  setMode(lastView);
+});
 
 /* ---------- server sync ---------- */
 async function pollState() {
   try {
     const r = await fetch('/api/state?teamId=' + encodeURIComponent(teamId));
     serverState = await r.json();
-    catchRadius = serverState.catchRadius || 30;
+    catchRadiusYd = serverState.catchRadiusYd || 30;
+    catchRadiusM  = serverState.catchRadiusM || (catchRadiusYd / YPM);
+    if (meRing) meRing.setRadius(catchRadiusM);
     if (serverState.team) $('score').textContent = serverState.team.points;
-    renderBoardIfOpen(); renderDexIfOpen();
+    refreshMonMarkers(); renderBoardIfOpen(); renderDexIfOpen();
   } catch (_) {}
 }
+function uncaught() { return serverState ? serverState.monsters.filter(m => !m.captured) : []; }
 
-function uncaughtActive() {
-  if (!serverState) return [];
-  return serverState.monsters.filter(m => !m.captured);
-}
-
-/* ---------- main render loop ---------- */
+/* ---------- main loop ---------- */
 function loop() {
   requestAnimationFrame(loop);
-  if (!serverState) { $('target').textContent = 'Connecting…'; return; }
-  const remaining = uncaughtActive();
+  if (!serverState) { $('near').textContent = '…'; return; }
+  const rem = uncaught();
 
-  if (!here) { $('target').textContent = 'Waiting for GPS…'; hideMon(); $('radar').style.display = 'none'; return; }
-  if (remaining.length === 0) {
-    $('target').innerHTML = 'No creatures in range right now. 🌙';
-    hideMon(); $('radar').style.display = 'none'; $('hint').textContent = 'Check the leaderboard, or wait for the next release.';
+  if (!here || rem.length === 0) {
+    $('near').textContent = rem.length ? 'GPS…' : 'none';
+    if (mode === 'capture') setMode(lastView);
+    if (mode === 'compass') { $('cxName').textContent = rem.length ? 'Waiting for GPS' : 'No creatures active'; $('cxDist').textContent = '— yds'; }
     return;
   }
 
-  // nearest remaining creature
+  // nearest
   let best = null, bd = Infinity;
-  for (const m of remaining) { const d = distM(here, m); if (d < bd) { bd = d; best = m; } }
+  for (const m of rem) { const d = distM(here, m); if (d < bd) { bd = d; best = m; } }
   active = best;
-  const brg = bearing(here, best);
-  $('target').innerHTML = 'NEAREST: <b>' + best.name + '</b> · ' + Math.round(bd) + 'm · ' + best.points + 'pts';
+  const bearingTo = bearing(here, best);
+  $('near').textContent = best.name + ' · ' + yards(bd) + 'yd';
 
+  // auto in/out of capture
+  if (bd <= catchRadiusM && mode !== 'capture') setMode('capture');
+  else if (bd > catchRadiusM && mode === 'capture') setMode(lastView);
+
+  if (mode === 'compass') renderCompass(best, bearingTo, bd);
+  else if (mode === 'capture') renderCapture(best, bearingTo, bd);
+}
+
+/* ---------- compass render ---------- */
+function renderCompass(m, brg, d) {
+  $('cxName').innerHTML = 'Nearest: <b>' + esc(m.name) + '</b> · ' + m.points + ' pts';
+  $('cxDist').textContent = yards(d) + ' yds';
+  const bad = heading == null || (typeof headingAcc === 'number' && (headingAcc < 0 || headingAcc > 20));
+  $('cxCal').classList.toggle('hidden', !bad);
+  if (heading != null) $('cxArrow').style.transform = 'rotate(' + angDiff(brg, heading) + 'deg)';
+}
+
+/* ---------- capture render (camera) ---------- */
+function renderCapture(m, brg, d) {
   const upright = tilt != null && tilt > UP_MIN && tilt < UP_MAX;
-
-  // you're basically on it -> it materializes ahead if the phone is up
-  if (bd <= NEAR) {
-    if (upright) { showMon(best, 50, 50, bd); $('radar').style.display = 'none'; $('hint').textContent = "It's right here — tap it!"; }
-    else { hideMon(); $('hint').textContent = 'Raise your phone to see it'; }
-    return;
-  }
-
-  if (heading == null) { $('hint').textContent = 'Wave the phone in a figure-8 to wake the compass'; hideMon(); $('radar').style.display='none'; return; }
-
+  if (!upright) { hideMon(); $('capHint').textContent = 'Raise your phone like a window'; return; }
+  if (d <= NEAR) { showMon(m, 50, 50); $('capHint').textContent = "It's right here — tap it!"; return; }
+  if (heading == null) { showMon(m, 50, 50); $('capHint').textContent = 'Tap the creature to catch'; return; }
   const err = angDiff(brg, heading);
-  if (upright && Math.abs(err) < FOV / 2) {
-    showMon(best, 50 + (err / (FOV / 2)) * 46, 48, bd);
-    $('radar').style.display = 'none';
-    $('hint').textContent = bd <= catchRadius ? 'Line it up and tap Catch' : 'Get within ' + catchRadius + 'm — move closer';
-  } else {
-    hideMon();
-    $('radar').style.display = 'block';
-    $('arrow').setAttribute('transform', 'rotate(' + err + ' 50 50)');
-    $('radarLbl').textContent = (err > 0 ? 'turn right ' : 'turn left ') + Math.abs(Math.round(err)) + '° · ' + Math.round(bd) + 'm';
-    $('hint').textContent = upright ? 'Sweep toward the arrow' : 'Raise your phone and turn';
-  }
+  if (Math.abs(err) < FOV/2) { showMon(m, 50 + (err/(FOV/2))*46, 48); $('capHint').textContent = 'Tap it to catch'; }
+  else { hideMon(); $('capHint').textContent = (err > 0 ? 'Turn right →' : '← Turn left') + ' to face it'; }
 }
-
-function showMon(m, xPct, yPct, dist) {
-  const el = $('mon');
-  el.style.display = 'flex'; el.style.left = xPct + '%'; el.style.top = yPct + '%';
+function showMon(m, x, y) {
+  const el = $('mon'); el.style.display='flex'; el.style.left=x+'%'; el.style.top=y+'%';
   $('monBody').textContent = m.species || '👾'; $('monTag').textContent = m.name;
-  $('catchBtn').style.display = dist <= catchRadius ? 'block' : 'none';
+  $('catchBtn').style.display = 'block';
 }
-function hideMon() { $('mon').style.display = 'none'; $('catchBtn').style.display = 'none'; }
+function hideMon(){ $('mon').style.display='none'; $('catchBtn').style.display='none'; }
 
-/* ---------- capture ---------- */
+/* ---------- capture action ---------- */
 async function doCatch() {
   if (!active || busy || !here) return;
   busy = true;
   try {
-    const r = await fetch('/api/capture', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ teamId, monsterId: active.id, lat: here.lat, lon: here.lon })
-    });
+    const r = await fetch('/api/capture', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ teamId, monsterId: active.id, lat: here.lat, lon: here.lon }) });
     const d = await r.json();
     if (r.ok) {
-      celebrate(d.species, d.name, d.points);
-      $('score').textContent = d.teamPoints;
-      if (serverState) { const hit = serverState.monsters.find(x => x.id === active.id); if (hit) { hit.captured = true; hit.capturedByYou = true; } }
-      hideMon();
-      pollState();
-    } else if (r.status === 409) {
-      $('hint').textContent = 'Too slow — ' + (d.capturedBy || 'another team') + ' already caught it!';
-      pollState();
-    } else {
-      $('hint').textContent = d.error || 'Could not catch that.';
-    }
-  } catch (_) { $('hint').textContent = 'Network error.'; }
+      celebrate(d.species, d.name, d.points); $('score').textContent = d.teamPoints;
+      const hit = serverState.monsters.find(x => x.id === active.id); if (hit){ hit.captured=true; hit.capturedByYou=true; }
+      if (monMarkers[active.id]) { map.removeLayer(monMarkers[active.id]); delete monMarkers[active.id]; }
+      hideMon(); pollState();
+    } else if (r.status === 409) { $('capHint').textContent = 'Too slow — ' + (d.capturedBy||'another team') + ' got it!'; pollState(); }
+    else { $('capHint').textContent = d.error || 'Could not catch that.'; }
+  } catch (_) { $('capHint').textContent = 'Network error.'; }
   finally { busy = false; }
 }
 $('catchBtn').addEventListener('click', doCatch);
 $('mon').addEventListener('click', doCatch);
-
 function celebrate(em, name, pts) {
-  $('tEm').textContent = em || '✨'; $('tName').textContent = name;
-  $('tPts').textContent = '+' + pts + ' pts';
-  $('flash').style.opacity = '.85'; setTimeout(() => $('flash').style.opacity = '0', 110);
-  const t = $('toast'); t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1500);
+  $('tEm').textContent = em || '✨'; $('tName').textContent = name; $('tPts').textContent = '+' + pts + ' pts';
+  $('flash').style.opacity='.85'; setTimeout(()=>$('flash').style.opacity='0',110);
+  const t = $('toast'); t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1500);
 }
 
-/* ---------- leaderboard panel ---------- */
-$('boardBtn').addEventListener('click', () => { $('board').style.display = 'flex'; renderBoardIfOpen(); });
-$('boardClose').addEventListener('click', () => { $('board').style.display = 'none'; });
+/* ---------- panels ---------- */
+$('boardBtn').addEventListener('click', () => { $('board').style.display='flex'; renderBoardIfOpen(); });
+$('boardClose').addEventListener('click', () => { $('board').style.display='none'; });
 function renderBoardIfOpen() {
   if ($('board').style.display !== 'flex' || !serverState) return;
   const lb = serverState.leaderboard || [];
-  $('boardSub').textContent = lb.length + ' team' + (lb.length === 1 ? '' : 's') + ' · live';
-  $('boardList').innerHTML = lb.map((t, i) =>
-    `<div class="row ${String(t.id) === String(teamId) ? 'me' : ''}">
-      <div class="rank">${i + 1}</div>
-      <div class="nm">${esc(t.name)}</div>
-      <div class="pts">${t.points}<span class="cnt">${t.catches}🐾</span></div>
-    </div>`).join('') || '<div class="sub">No teams yet.</div>';
+  $('boardSub').textContent = lb.length + ' team' + (lb.length===1?'':'s') + ' · live';
+  $('boardList').innerHTML = lb.map((t,i) =>
+    `<div class="row ${String(t.id)===String(teamId)?'me':''}"><div class="rank">${i+1}</div>
+     <div class="nm">${esc(t.name)}</div><div class="pts">${t.points}<span class="cnt">${t.catches}🐾</span></div></div>`
+  ).join('') || '<div class="sub">No teams yet.</div>';
 }
-
-/* ---------- dex panel ---------- */
-$('dexBtn').addEventListener('click', () => { $('dex').style.display = 'flex'; renderDexIfOpen(); });
-$('dexClose').addEventListener('click', () => { $('dex').style.display = 'none'; });
+$('dexBtn').addEventListener('click', () => { $('dex').style.display='flex'; renderDexIfOpen(); });
+$('dexClose').addEventListener('click', () => { $('dex').style.display='none'; });
 function renderDexIfOpen() {
   if ($('dex').style.display !== 'flex' || !serverState) return;
   const mine = serverState.monsters.filter(m => m.capturedByYou);
   $('dexSub').textContent = mine.length + ' caught by ' + teamName;
   $('dexList').innerHTML = mine.map(m =>
-    `<div class="row dexrow"><div class="em">${m.species || '👾'}</div>
-      <div class="nm">${esc(m.name)}<div class="st">+${m.points} pts</div></div></div>`
+    `<div class="row dexrow"><div class="em">${m.species||'👾'}</div><div class="nm">${esc(m.name)}<div class="st">+${m.points} pts</div></div></div>`
   ).join('') || '<div class="sub">Nothing yet — go catch something!</div>';
 }
 
-function esc(t) { return String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+function esc(t){ return String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
