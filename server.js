@@ -5,6 +5,12 @@ const express = require('express');
 const store = require('./db');
 const { parseKml } = require('./kml');
 
+// settings helpers
+function getSetting(key, fallback) { const r = store.getSetting.get(key); return r ? r.value : fallback; }
+function setSetting(key, value) { store.setSetting.run({ key, value: String(value) }); }
+if (getSetting('playerMapEnabled') == null) setSetting('playerMapEnabled', '1');
+
+
 /* ---------- tiny .env loader (no dependency) ---------- */
 (function loadEnv() {
   try {
@@ -91,6 +97,7 @@ app.get('/api/state', (req, res) => {
 
   res.json({
     now,
+    mapEnabled: getSetting('playerMapEnabled', '1') !== '0',
     catchRadiusYd: CATCH_RADIUS_YD,
     catchRadiusM: CATCH_RADIUS_M,
     team: me ? { id: me.id, name: me.name, points: myRow ? myRow.points : 0, catches: myRow ? myRow.catches : 0 } : null,
@@ -197,6 +204,14 @@ app.post('/api/admin/reset', requireAdmin, (req, res) => {
   if (what === 'captures') { store.clearCaptures.run(); return res.json({ ok: true, reset: 'captures' }); }
   if (what === 'all') { store.clearCaptures.run(); store.clearMonsters.run(); return res.json({ ok: true, reset: 'all' }); }
   res.status(400).json({ error: "Specify what: 'captures' or 'all'." });
+});
+
+app.get('/api/admin/settings', requireAdmin, (req, res) => {
+  res.json({ mapEnabled: getSetting('playerMapEnabled', '1') !== '0' });
+});
+app.post('/api/admin/settings', requireAdmin, (req, res) => {
+  if (typeof req.body.mapEnabled === 'boolean') setSetting('playerMapEnabled', req.body.mapEnabled ? '1' : '0');
+  res.json({ ok: true, mapEnabled: getSetting('playerMapEnabled', '1') !== '0' });
 });
 
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));

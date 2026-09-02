@@ -119,3 +119,5 @@ button{font-family:inherit;cursor:pointer;}
 .recenter{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 22px);left:50%;transform:translateX(-50%);
   pointer-events:auto;background:rgba(5,20,12,.8);border:1px solid rgba(125,255,155,.4);color:var(--signal);
   border-radius:999px;padding:11px 22px;font-size:14px;font-weight:700;letter-spacing:.04em;backdrop-filter:blur(6px);}
+
+.linklike{background:none;border:none;color:var(--dim);font-family:inherit;font-size:12px;letter-spacing:.06em;margin-top:16px;text-decoration:underline;opacity:.7;}

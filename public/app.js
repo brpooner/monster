@@ -14,6 +14,9 @@ let catchRadiusM = 27.43, catchRadiusYd = 30;
 let mode = 'compass';          // actual visible mode: compass | map | capture | rest
 let userView = 'compass';      // what the player chose while hunting: compass | map
 let camStream = null, busy = false, capturing = false;
+let mapEnabled = true;
+let adminKey = localStorage.getItem('wildscan.admin') || '';
+let adminUnlocked = !!adminKey;
 let map = null, mapReady = false, meMarker = null, meRing = null, monMarkers = {}, followMe = true;
 
 /* ---------- geo ---------- */
@@ -145,7 +148,7 @@ function applyMode(m) {
   $('scrim').classList.toggle('hidden', !isCap);
   $('capHud').classList.toggle('hidden', !isCap);
   // mode toggle only makes sense while actively hunting (compass/map)
-  $('modeBtn').style.display = (isCap || isRest) ? 'none' : 'block';
+  $('modeBtn').style.display = (isCap || isRest || !mapAllowed()) ? 'none' : 'block';
   $('recenter').style.display = isMap ? 'block' : 'none';
   $('modeBtn').textContent = isMap ? '‹ Compass' : 'Map ›';
   if (isMap) {
@@ -160,6 +163,7 @@ function applyMode(m) {
 }
 $('modeBtn').addEventListener('click', () => {
   if (mode === 'capture' || mode === 'rest') return;
+  if (!mapAllowed()) return;
   userView = (mode === 'compass') ? 'map' : 'compass';
   applyMode(userView);
 });
@@ -173,9 +177,20 @@ async function pollState() {
     catchRadiusM  = serverState.catchRadiusM || (catchRadiusYd / YPM);
     if (meRing) meRing.setRadius(catchRadiusM);
     if (serverState.team) $('score').textContent = serverState.team.points;
+    mapEnabled = serverState.mapEnabled !== false;
+    applyMapVisibility();
     refreshMonMarkers(); renderBoardIfOpen(); renderDexIfOpen(); if (mode==='rest') renderRest();
   } catch (_) {}
 }
+function mapAllowed() { return mapEnabled || adminUnlocked; }
+function applyMapVisibility() {
+  const allowed = mapAllowed();
+  // if map just got disabled and we're on it (and not admin), bounce to compass
+  if (!allowed && (mode === 'map' || userView === 'map')) { userView = 'compass'; if (mode === 'map') applyMode('compass'); }
+  // show/hide the Map toggle button appropriately
+  if (mode !== 'capture' && mode !== 'rest') $('modeBtn').style.display = allowed ? 'block' : 'none';
+}
+
 function uncaught() { return serverState ? serverState.monsters.filter(m => !m.captured) : []; }
 
 /* ---------- main loop ---------- */
@@ -301,5 +316,17 @@ $('recenter').addEventListener('click', () => {
 function kickMapSize(){ if (map && mode==='map'){ map.invalidateSize(); if (followMe && here) map.setView([here.lat,here.lon], map.getZoom()); } }
 window.addEventListener('resize', kickMapSize);
 window.addEventListener('orientationchange', () => setTimeout(kickMapSize, 300));
+
+/* ---------- admin unlock (keeps map on this device regardless of toggle) ---------- */
+const adminUnlockBtn = document.getElementById('adminUnlock');
+if (adminUnlockBtn) adminUnlockBtn.addEventListener('click', async () => {
+  const k = prompt('Enter admin key to keep the map on this device:');
+  if (!k) return;
+  try {
+    const r = await fetch('/api/admin/settings', { headers: { 'x-admin-key': k } });
+    if (r.ok) { adminKey = k; adminUnlocked = true; localStorage.setItem('wildscan.admin', k); applyMapVisibility(); alert('Admin unlocked — the map will always be available here.'); }
+    else alert('That key was not accepted.');
+  } catch (_) { alert('Network error.'); }
+});
 
 function esc(t){ return String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }

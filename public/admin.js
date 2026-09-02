@@ -88,6 +88,7 @@ async function loadState() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Failed');
     $('keyMsg').className = 'msg ok'; $('keyMsg').textContent = 'Key OK.';
+    loadSettings();
     const rows = d.monsters || [];
     $('countMsg').textContent = rows.length + ' monster(s). ' + (d.leaderboard || []).length + ' team(s).';
     $('curTable').style.display = rows.length ? '' : 'none';
@@ -172,5 +173,20 @@ function syncPins() {
   });
 }
 window.addEventListener('load', initAdminMap);
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/admin/settings', { headers: { 'x-admin-key': key() } });
+    const d = await r.json();
+    if (r.ok) $('mapEnabled').checked = !!d.mapEnabled;
+  } catch (_) {}
+}
+$('mapEnabled').addEventListener('change', async () => {
+  $('setMsg').className = 'msg'; $('setMsg').textContent = 'Saving…';
+  try {
+    await api('/api/admin/settings', { mapEnabled: $('mapEnabled').checked });
+    $('setMsg').className = 'msg ok'; $('setMsg').textContent = $('mapEnabled').checked ? 'Players can now see the map.' : 'Map hidden from players.';
+  } catch (e) { $('setMsg').className = 'msg bad'; $('setMsg').textContent = e.message; loadSettings(); }
+});
 
 function esc(t) { return String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }

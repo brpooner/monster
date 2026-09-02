@@ -38,10 +38,20 @@ CREATE TABLE IF NOT EXISTS captures (
   lat         REAL,
   lon         REAL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
 `);
 
 module.exports = {
   db,
+
+  getSetting: db.prepare(`SELECT value FROM settings WHERE key = ?`),
+  setSetting: db.prepare(`INSERT INTO settings (key, value) VALUES (@key, @value)
+                          ON CONFLICT(key) DO UPDATE SET value = @value`),
+
 
   createTeam: db.prepare(
     `INSERT INTO teams (name, pin, created_at) VALUES (@name, @pin, @created_at)`
