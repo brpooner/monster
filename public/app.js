@@ -106,7 +106,7 @@ function stopCamera() { if (camStream){ camStream.getTracks().forEach(t=>t.stop(
 function ensureMap() {
   if (mapReady) return;
   map = L.map('map', { zoomControl:false, attributionControl:false }).setView([41.111966,-83.213732], 17);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19 }).addTo(map);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom:20, attribution:'Imagery © Esri' }).addTo(map);
   map.on('dragstart', () => { followMe = false; });
   mapReady = true;
 }
